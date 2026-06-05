@@ -270,6 +270,12 @@ sub assert_host {
   die "$label 不合法\n" if $value !~ /\A[A-Za-z0-9_.:-]+\z/;
 }
 
+sub assert_profile_name {
+  my ($value) = @_;
+  die "OpenVPN Connect Profile Name 不能为空\n" if !defined($value) || $value eq '';
+  die "OpenVPN Connect Profile Name 不能包含换行或制表符\n" if $value =~ /[\r\n\t]/;
+}
+
 sub assert_port {
   my ($label, $value) = @_;
   die "$label 必须是 1-65535 的数字端口\n" if !defined($value) || $value !~ /\A\d+\z/ || $value < 1 || $value > 65535;
@@ -286,6 +292,8 @@ sub validate_doc {
     die "客户端名称重复: $client->{name}\n" if $names{$client->{name}}++;
     die "客户端固定 IP 重复: $client->{vpn_ip}\n" if $ips{$client->{vpn_ip}}++;
 
+    $client->{profile_name} = $client->{name} if !defined($client->{profile_name}) || $client->{profile_name} eq '';
+    assert_profile_name($client->{profile_name});
     $client->{generate_client} = JSON::PP::true if !exists $client->{generate_client};
     $client->{remote_host} = '' if !defined $client->{remote_host};
     $client->{remote_port} = '' if !defined $client->{remote_port};
@@ -313,9 +321,11 @@ sub validate_doc {
 }
 
 sub client_from_args {
-  my ($name, $vpn_ip, $tag, $server, $port, $username, $password, $network, $unmatched_policy, $generate, $remote_host, $remote_port) = @_;
+  my ($name, $profile_name, $vpn_ip, $tag, $server, $port, $username, $password, $network, $unmatched_policy, $generate, $remote_host, $remote_port) = @_;
+  $profile_name = $name if !defined($profile_name) || $profile_name eq '';
   return {
     name => $name,
+    profile_name => $profile_name,
     vpn_ip => $vpn_ip,
     generate_client => ($generate // 'true') eq 'false' ? JSON::PP::false : JSON::PP::true,
     remote_host => $remote_host // '',
@@ -391,6 +401,7 @@ if ($cmd eq 'get') {
     next if $client->{name} ne $name;
     print join("\t",
       $client->{name},
+      $client->{profile_name},
       $client->{vpn_ip},
       $client->{socks}{tag},
       $client->{socks}{server},
@@ -415,6 +426,7 @@ if ($cmd eq 'list') {
   for my $client (@{$doc->{clients}}) {
     print join("\t",
       $client->{name},
+      $client->{profile_name},
       $client->{vpn_ip},
       $client->{socks}{tag},
       $client->{socks}{server},
@@ -435,7 +447,7 @@ if ($cmd eq 'client-lines') {
     my $remote_host = $client->{remote_host} || $default_host;
     my $remote_port = $client->{remote_port} || $default_port;
     my $ccd = "ifconfig-push $client->{vpn_ip} 255.255.255.0";
-    print join("\t", $client->{name}, $remote_host, $remote_port, $ccd), "\n";
+    print join("\t", $client->{name}, $remote_host, $remote_port, $ccd, $client->{profile_name}), "\n";
   }
   exit 0;
 }
@@ -679,17 +691,18 @@ show_proxy_clients_json() {
 prompt_proxy_client_fields() {
   local editable_name="$1"
   local default_name="$2"
-  local default_vpn_ip="$3"
-  local default_tag="$4"
-  local default_server="$5"
-  local default_port="$6"
-  local default_username="$7"
-  local default_password="$8"
-  local default_network="$9"
-  local default_unmatched_policy="${10}"
-  local default_generate="${11}"
-  local default_remote_host="${12}"
-  local default_remote_port="${13}"
+  local default_profile_name="$3"
+  local default_vpn_ip="$4"
+  local default_tag="$5"
+  local default_server="$6"
+  local default_port="$7"
+  local default_username="$8"
+  local default_password="$9"
+  local default_network="${10}"
+  local default_unmatched_policy="${11}"
+  local default_generate="${12}"
+  local default_remote_host="${13}"
+  local default_remote_port="${14}"
 
   if [[ "$editable_name" == "true" ]]; then
     PROXY_CLIENT_NAME="$(prompt_text "客户端名称" "$default_name")"
@@ -698,6 +711,10 @@ prompt_proxy_client_fields() {
     printf '客户端名称 [%s]\n' "$PROXY_CLIENT_NAME"
   fi
 
+  if [[ -z "$default_profile_name" ]]; then
+    default_profile_name="$PROXY_CLIENT_NAME"
+  fi
+  PROXY_CLIENT_PROFILE_NAME="$(prompt_text "OpenVPN Connect Profile Name（导入后显示名）" "$default_profile_name")"
   PROXY_CLIENT_VPN_IP="$(prompt_text "固定 VPN IP" "$default_vpn_ip")"
   PROXY_CLIENT_SOCKS_TAG="$(prompt_text "SOCKS tag" "$default_tag")"
   PROXY_CLIENT_SOCKS_SERVER="$(prompt_text "SOCKS 地址" "$default_server")"
@@ -722,6 +739,7 @@ add_proxy_mapping() {
   prompt_proxy_client_fields \
     "true" \
     "client1" \
+    "client1" \
     "10.8.0.10" \
     "socks-client1" \
     "127.0.0.1" \
@@ -737,6 +755,7 @@ add_proxy_mapping() {
   proxy_json_tool add \
     "$OVPN_PROXY_CLIENTS_FILE" \
     "$PROXY_CLIENT_NAME" \
+    "$PROXY_CLIENT_PROFILE_NAME" \
     "$PROXY_CLIENT_VPN_IP" \
     "$PROXY_CLIENT_SOCKS_TAG" \
     "$PROXY_CLIENT_SOCKS_SERVER" \
@@ -756,7 +775,7 @@ select_proxy_client_name() {
   local choice
   local index
   local line
-  local name vpn_ip tag server port network unmatched_policy
+  local name profile_name vpn_ip tag server port network unmatched_policy
   local -a lines
 
   mapfile -t lines < <(proxy_json_tool list "$OVPN_PROXY_CLIENTS_FILE")
@@ -765,9 +784,9 @@ select_proxy_client_name() {
   printf '\n已有映射:\n'
   for index in "${!lines[@]}"; do
     line="${lines[$index]}"
-    IFS=$'\t' read -r name vpn_ip tag server port network unmatched_policy <<<"$line"
-    printf '  %d. %s  VPN=%s  SOCKS=%s(%s:%s)  network=%s  unmatched=%s\n' \
-      "$((index + 1))" "$name" "$vpn_ip" "$tag" "$server" "$port" "$network" "$unmatched_policy"
+    IFS=$'\t' read -r name profile_name vpn_ip tag server port network unmatched_policy <<<"$line"
+    printf '  %d. %s  Profile="%s"  VPN=%s  SOCKS=%s(%s:%s)  network=%s  unmatched=%s\n' \
+      "$((index + 1))" "$name" "$profile_name" "$vpn_ip" "$tag" "$server" "$port" "$network" "$unmatched_policy"
   done
 
   read -r -p "$prompt [1-${#lines[@]}]: " choice
@@ -785,7 +804,7 @@ select_proxy_client_name() {
 edit_proxy_mapping() {
   local name
   local current
-  local current_name current_vpn_ip current_tag current_server current_port
+  local current_name current_profile_name current_vpn_ip current_tag current_server current_port
   local current_username current_password current_network current_unmatched_policy current_generate
   local current_remote_host current_remote_port
 
@@ -796,6 +815,7 @@ edit_proxy_mapping() {
   current="$(proxy_json_tool get "$OVPN_PROXY_CLIENTS_FILE" "$name")"
   IFS=$'\t' read -r \
     current_name \
+    current_profile_name \
     current_vpn_ip \
     current_tag \
     current_server \
@@ -811,6 +831,7 @@ edit_proxy_mapping() {
   prompt_proxy_client_fields \
     "false" \
     "$current_name" \
+    "$current_profile_name" \
     "$current_vpn_ip" \
     "$current_tag" \
     "$current_server" \
@@ -826,6 +847,7 @@ edit_proxy_mapping() {
   proxy_json_tool edit \
     "$OVPN_PROXY_CLIENTS_FILE" \
     "$PROXY_CLIENT_NAME" \
+    "$PROXY_CLIENT_PROFILE_NAME" \
     "$PROXY_CLIENT_VPN_IP" \
     "$PROXY_CLIENT_SOCKS_TAG" \
     "$PROXY_CLIENT_SOCKS_SERVER" \
@@ -1085,7 +1107,7 @@ render_config_json() {
       "web_port": "$container_web_port",
       "server_cn": "$OVPN_SERVER_CN",
       "server_name": "$OVPN_SERVER_NAME",
-      "auto_update_ovpn_config": true,
+      "auto_update_ovpn_config": false,
       "history_max_days": 90,
       "validate_client_config": false
     }
@@ -1482,16 +1504,33 @@ normalize_redirect_gateway() {
 
 normalize_client_profile_proto() {
   local client_name="${1:-$OVPN_CLIENT_NAME}"
+  local profile_name="${2:-}"
   local client_file="$OVPN_INSTALL_DIR/data/clients/$client_name.ovpn"
 
   if [[ ! -f "$client_file" ]]; then
-    warn "未找到客户端配置文件，无法修正客户端协议: $client_file"
+    warn "未找到客户端配置文件，无法修正客户端协议或 Profile Name: $client_file"
     return 1
   fi
 
   if grep -q '^proto tcp-server$' "$client_file"; then
     sed -i 's/^proto tcp-server$/proto tcp-client/' "$client_file"
     log "已将客户端配置协议修正为 tcp-client: $client_file"
+  fi
+
+  if [[ -n "$profile_name" ]]; then
+    PROFILE_NAME="$profile_name" perl -0pi -e '
+      my $name = $ENV{"PROFILE_NAME"} // "";
+      $name =~ s/\\/\\\\/g;
+      $name =~ s/"/\\"/g;
+      my $line = "setenv FRIENDLY_NAME \"$name\"\n";
+      s/^setenv FRIENDLY_NAME .*\n//mg;
+      if (/\Aclient\n/) {
+        s/\Aclient\n/client\n$line/;
+      } else {
+        $_ = $line . $_;
+      }
+    ' "$client_file"
+    log "已设置 OpenVPN Connect Profile Name: $profile_name"
   fi
 }
 
@@ -1516,16 +1555,17 @@ create_proxy_clients() {
   local remote_host
   local remote_port
   local ccd
+  local profile_name
 
   if [[ "$OVPN_ENABLE_PROXY" != "true" ]]; then
     return
   fi
 
-  while IFS=$'\t' read -r name remote_host remote_port ccd; do
+  while IFS=$'\t' read -r name remote_host remote_port ccd profile_name; do
     [[ -n "$name" ]] || continue
     if docker exec "$OVPN_CONTAINER_NAME" /usr/bin/docker-entrypoint.sh \
       genclient "$name" "$remote_host" "$remote_port" "" "$ccd" "false" >/dev/null; then
-      normalize_client_profile_proto "$name" || true
+      normalize_client_profile_proto "$name" "$profile_name" || true
       log "已生成代理分流客户端: $name -> $remote_host:$remote_port / $ccd"
     else
       warn "生成代理分流客户端失败: $name"
