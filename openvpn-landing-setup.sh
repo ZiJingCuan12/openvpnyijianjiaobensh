@@ -1502,6 +1502,56 @@ normalize_redirect_gateway() {
   fi
 }
 
+normalize_server_tls_auth() {
+  local server_conf="$OVPN_INSTALL_DIR/data/server.conf"
+
+  if [[ ! -f "$server_conf" ]]; then
+    warn "未找到服务端配置文件，无法设置 tls-auth: $server_conf"
+    return 1
+  fi
+
+  perl -0pi -e '
+    s/^tls-crypt(?:-v2)?\s+(\S+).*$/tls-auth $1 0/mg;
+  ' "$server_conf"
+
+  if grep -Eq '^tls-auth[[:space:]]+' "$server_conf"; then
+    log "已将 OpenVPN 控制通道模式固定为 tls-auth。"
+  else
+    warn "未能在 server.conf 中确认 tls-auth，请手动检查: $server_conf"
+    return 1
+  fi
+}
+
+normalize_client_tls_auth() {
+  local client_file="$1"
+
+  if [[ ! -f "$client_file" ]]; then
+    return 1
+  fi
+
+  perl -0pi -e '
+    s/^tls-crypt(?:-v2)?\s+\S+.*\n//mg;
+    s/<tls-crypt(?:-v2)?>/<tls-auth>/g;
+    s#</tls-crypt(?:-v2)?>#</tls-auth>#g;
+    if (/<tls-auth>/ && !/^key-direction\s+/m) {
+      s/<tls-auth>/key-direction 1\n<tls-auth>/;
+    }
+  ' "$client_file"
+}
+
+normalize_existing_clients_tls_auth() {
+  local client_file
+
+  if [[ ! -d "$OVPN_INSTALL_DIR/data/clients" ]]; then
+    return
+  fi
+
+  for client_file in "$OVPN_INSTALL_DIR"/data/clients/*.ovpn; do
+    [[ -e "$client_file" ]] || continue
+    normalize_client_tls_auth "$client_file" || true
+  done
+}
+
 normalize_client_profile_proto() {
   local client_name="${1:-$OVPN_CLIENT_NAME}"
   local profile_name="${2:-}"
@@ -1516,6 +1566,8 @@ normalize_client_profile_proto() {
     sed -i 's/^proto tcp-server$/proto tcp-client/' "$client_file"
     log "已将客户端配置协议修正为 tcp-client: $client_file"
   fi
+
+  normalize_client_tls_auth "$client_file" || true
 
   if [[ -n "$profile_name" ]]; then
     PROFILE_NAME="$profile_name" perl -0pi -e '
@@ -1627,8 +1679,10 @@ deploy() {
     openvpn_ready=true
     apply_auth_setting
     normalize_redirect_gateway
+    normalize_server_tls_auth
     create_initial_client
     create_proxy_clients
+    normalize_existing_clients_tls_auth
   else
     warn "OpenVPN 初始化文件在等待时间内未生成，已跳过认证设置、网关修正和客户端生成。"
     warn "请检查: docker logs $OVPN_CONTAINER_NAME"
