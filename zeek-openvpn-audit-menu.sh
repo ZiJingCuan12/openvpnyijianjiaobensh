@@ -454,10 +454,12 @@ configure_ntopng_web() {
   cp "$conf" "${conf}.bak.$(date +%F-%H%M%S)"
   sed -i '/^-i=/d' "$conf"
   sed -i '/^--http-port=/d' "$conf"
+  sed -i '/^--community$/d' "$conf"
   cat >>"$conf" <<EOF
 
 -i=$NTOPNG_INTERFACE
 --http-port=$NTOPNG_WEB_BIND:$NTOPNG_WEB_PORT
+--community
 EOF
 
   save_config
@@ -963,6 +965,8 @@ Web 页面
 1. 安装/检查 ntopng Web 页面
 2. 配置 ntopng 监听网卡和端口
 3. 查看 ntopng 状态
+
+说明: 配置时会固定启用 Community 模式，避免 10 分钟 Enterprise 试用提示干扰判断。
 EOF
   print_return_items
 }
